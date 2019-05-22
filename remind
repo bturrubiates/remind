@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+
+import subprocess
+import datetime
+import argparse
+import shutil
+import shlex
+import errno
+import sys
+import re
+import os
+
+TLD_ENV_NAME = "REMIND_NOTES_DIR"
+TLD_DEFAULT = "~/meeting-notes/"
+
+GIT_DISABLE_ENV_NAME = "REMIND_GIT_DISABLE"
+
+EDITOR_ENV_NAME = "EDITOR"
+EDITOR_DEFAULT = "vim"
+
+
+class Git:
+    def __init__(self, tld):
+        self.tld = tld
+        self.path = shutil.which("git")
+        if not self.path:
+            raise RuntimeError("Unable to find usable Git executable")
+
+        self._tracked = None
+
+    def _format_cmd(self, command):
+        return shlex.split("{} {}".format(self.path, command))
+
+    def _run(self, command, **kwargs):
+        return subprocess.Popen(
+            self._format_cmd(command), cwd=self.tld, **kwargs
+        )
+
+    def _run_silent(self, command):
+        context = self._run(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        return context.wait()
+
+    def _run_capture(self, command):
+        context = self._run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        return context.communicate()
+
+    def add(self, filename):
+        return self._run_silent("add {}".format(filename))
+
+    def rm(self, filename):
+        return self._run_silent("rm {}".format(filename))
+
+    def commit(self):
+        context = self._run("commit")
+        context.wait()
+
+    def initialize(self):
+        return self._run_silent("init")
+
+    def is_tracked(self, filename):
+        return os.path.basename(filename) in self.tracked
+
+    def is_modified(self, filename):
+        return self._run_silent(
+            "diff --exit-code --name-only {}".format(filename)
+        )
+
+    @property
+    def is_initialized(self):
+        return self._run_silent("rev-parse --git-dir") == 0
+
+    @property
+    def tracked(self):
+        if not self._tracked:
+            self._tracked = set()
+
+            paths, _ = self._run_capture("ls-files")
+            for path in paths.decode().split("\n"):
+                if path:
+                    _, note = path.split("/")
+                    self._tracked.add(note)
+
+        return self._tracked
+
+
+def prompt(message, prefix=">>"):
+    return input(
+        "{prefix} {message}\n{prefix} ".format(prefix=prefix, message=message)
+    ).strip()
+
+
+def yesno(message, default="yes"):
+    if default != "yes" and default != "no":
+        raise ValueError("default must be yes/no")
+
+    response = prompt("{} [{}]".format(message, default))
+    while True:
+        if response == "":
+            return True
+
+        if re.match("^(y)(es)?", response, re.IGNORECASE):
+            return default == "yes"
+        elif re.match("^(n)(o)?", response, re.IGNORECASE):
+            return default == "no"
+
+        response = prompt("{} [{}]".format(message, default))
+
+
+def git_prompt_commit(note):
+    return yesno("Git commit the note {}?".format(note))
+
+
+def git_prompt_delete(note):
+    return yesno("Git rm the note {}?".format(note))
+
+
+def check_directory(directory):
+    if not os.path.exists(directory):
+        yes = yesno("{} does not exist, create?".format(directory))
+        if yes:
+            os.makedirs(directory, exist_ok=True)
+        else:
+            print("Cannot continue without {}".format(directory))
+            sys.exit(1)
+
+
+def get_and_verify_tld():
+    tld = os.path.expanduser(os.environ.get(TLD_ENV_NAME, TLD_DEFAULT))
+    check_directory(tld)
+
+    return tld
+
+
+def get_filename(tld, filename):
+    date = datetime.datetime.now().strftime("%y-%m-%d")
+    check_directory(os.path.join(tld, date))
+
+    return os.path.join(tld, date, filename)
+
+
+def get_git_config(tld):
+    disabled = int(os.environ.get(GIT_DISABLE_ENV_NAME, 0)) == 1
+    if disabled:
+        return None
+
+    try:
+        git = Git(tld)
+    except RuntimeError:
+        print(
+            "No usable Git implementation found, continuing without it.",
+            file=sys.stderr,
+        )
+        return None
+
+    if not git.is_initialized:
+        init = yesno("Do you want to initialize git for {}?".format(tld))
+        if not init:
+            return None
+
+        git.initialize()
+
+    return git
+
+
+def prepopulate_note(filename):
+    basename = os.path.basename(filename)
+
+    with open(filename, "w+") as f:
+        why = prompt("What is the purpose of the meeting?")
+        where = prompt("Where was the meeting located?")
+        when = prompt("What time was the meeting? [leave empty for timestamp]")
+        who = prompt("Who attended the meeting?")
+
+        if not when:
+            when = datetime.datetime.now().isoformat()
+
+        f.write("---\n")
+        f.write("title: {}\n".format(basename))
+        f.write("purpose: {}\n".format(why))
+        f.write("location: {}\n".format(where))
+        f.write("time: {}\n".format(when))
+        f.write("participants: {}\n".format(who))
+        f.write("---\n")
+
+
+def edit(filename):
+    editor = os.environ.get(EDITOR_ENV_NAME, EDITOR_DEFAULT)
+    subprocess.call([editor, filename])
+
+
+def walk_notes(tld):
+    for root, directory, files in os.walk(tld):
+        # Prune the hidden directories, i.e. .git
+        directory[:] = [d for d in directory if not d.startswith(".")]
+
+        # Skip the top level directory
+        if root == tld:
+            continue
+
+        date = os.path.basename(root)
+        yield date, files
+
+
+def find_note(tld, name):
+    for date, notes in walk_notes(tld):
+        if name in notes:
+            return os.path.join(tld, date, name)
+
+    return None
+
+
+def command_new(args, tld):
+    git = get_git_config(tld)
+    note = get_filename(tld, args.filename)
+    prepopulate_note(note)
+
+    edit(note)
+
+    if git and git_prompt_commit(note):
+        git.add(note)
+        git.commit()
+
+
+def command_delete(args, tld):
+    git = get_git_config(tld)
+    note = find_note(tld, args.filename)
+    if not note:
+        print("Unable to find note")
+        sys.exit(1)
+
+    delete = yesno("Are you sure you want to delete the note {}".format(note))
+    if not delete:
+        return
+
+    os.remove(note)
+    note_directory = os.path.dirname(note)
+
+    if not os.listdir(note_directory):
+        os.rmdir(note_directory)
+
+    if git and git.is_tracked(note) and git_prompt_delete(note):
+        git.rm(note)
+        git.commit()
+
+
+def command_list(args, tld):
+    prefix = "" if args.name_only else "\t"
+    git = get_git_config(tld)
+
+    for date, notes in walk_notes(tld):
+        if not args.name_only:
+            print(date + os.path.sep)
+
+        for note in notes:
+            if git and args.decorate:
+                decoration = "[t] " if git.is_tracked(note) else "[u] "
+            else:
+                decoration = ""
+
+            print(prefix + decoration + note)
+
+
+def command_edit(args, tld):
+    git = get_git_config(tld)
+    note = find_note(tld, args.filename)
+    if not note:
+        print("Unable to find note")
+        sys.exit(1)
+
+    edit(note)
+
+    if git and git.is_modified(note) and git_prompt_commit(note):
+        git.add(note)
+        git.commit()
+
+
+def command_find(args, tld):
+    note = find_note(tld, args.note)
+    if not note:
+        print("Unable to find note")
+        sys.exit(1)
+
+    print(note)
+
+
+def parse_arguments():
+    description = "A script to manage meeting notes"
+
+    parser = argparse.ArgumentParser(description=description)
+    sub = parser.add_subparsers(dest="command")
+    sub.required = True
+
+    new = sub.add_parser("new", help="Create a new meeting note")
+    new.add_argument("filename", help="Name of new note")
+
+    delete = sub.add_parser("delete", help="Delete a meeting note")
+    delete.add_argument("filename", help="Name of note to delete")
+
+    l = sub.add_parser("list", help="List meeting notes")
+    l.add_argument("--name-only", help="List names only", action="store_true")
+    l.add_argument(
+        "--decorate", help="Include Git tracking info", action="store_true"
+    )
+
+    e = sub.add_parser("edit", help="Edit meeting notes")
+    e.add_argument("filename", help="Name of note to edit")
+
+    f = sub.add_parser("find", help="Find meeting note by name")
+    f.add_argument("note", help="Name of note to find")
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_arguments()
+    tld = get_and_verify_tld()
+
+    commands = {
+        "new": command_new,
+        "delete": command_delete,
+        "list": command_list,
+        "edit": command_edit,
+        "find": command_find,
+    }
+
+    commands[args.command](args, tld)
+
+
+if __name__ == "__main__":
+    exit(main())

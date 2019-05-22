@@ -1,0 +1,32 @@
+#!/usr/bin/env zsh
+
+fuzzy_remind() {
+    notes=$(remind list --name-only)
+    echo "$notes" | fzf --prompt="[note] >"                                    \
+                        --ansi                                                 \
+                        --no-sort                                              \
+                        --reverse                                              \
+                        --bind="ctrl-u:preview-page-up"                        \
+                        --bind="ctrl-d:preview-page-down"                      \
+                        --bind="ctrl-k:preview-up"                             \
+                        --bind="ctrl-j:preview-down"                           \
+                        --preview="remind find {} | xargs -I % cat %"          \
+                        --preview-window='down:85%'                            \
+                        --expect=ctrl-m,del                                    \
+                        --query="$1"
+}
+
+out=$(fuzzy_remind "$1")
+selection=("${(f)out}")
+
+key="$selection[1]"
+note="$selection[2]"
+
+case "$key" in
+    ctrl-m)
+        remind edit "$note"
+        ;;
+    del)
+        remind delete "$note"
+        ;;
+esac
