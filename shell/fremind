@@ -1,7 +1,9 @@
 #!/usr/bin/env zsh
 
 fuzzy_remind() {
-    notes=$(remind list --name-only)
+    notes="$1"
+    query="$2"
+
     echo "$notes" | fzf --prompt="[note] >"                                    \
                         --ansi                                                 \
                         --no-sort                                              \
@@ -13,10 +15,16 @@ fuzzy_remind() {
                         --preview="remind find {} | xargs -I % cat %"          \
                         --preview-window='down:85%'                            \
                         --expect=ctrl-m,del                                    \
-                        --query="$1"
+                        --query="$query"
 }
 
-out=$(fuzzy_remind "$1")
+notes=$(remind list --name-only)
+if [[ -z "$notes" ]]; then
+    echo "No notes to list."
+    exit 1
+fi
+
+out=$(fuzzy_remind "$notes" "$1")
 selection=("${(f)out}")
 
 key="$selection[1]"
