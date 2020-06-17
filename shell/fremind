@@ -12,29 +12,67 @@ fuzzy_remind() {
                         --bind="ctrl-d:preview-page-down"                      \
                         --bind="ctrl-k:preview-up"                             \
                         --bind="ctrl-j:preview-down"                           \
-                        --preview="remind find {} | xargs -I % cat %"          \
+                        --preview="echo {} | cut -d':' -f1 |                   \
+                                             xargs -I % remind find % |        \
+                                             xargs -I @ cat @"                 \
                         --preview-window='down:85%'                            \
                         --expect=ctrl-m,del                                    \
                         --query="$query"
 }
 
-notes=$(remind list --name-only)
-if [[ -z "$notes" ]]; then
-    echo "No notes to list."
-    exit 1
+names() {
+    notes=$(remind list --oneline)
+    if [[ -z "$notes" ]]; then
+        echo "No notes to list."
+        exit 1
+    fi
+
+    out=$(fuzzy_remind "$notes" "$1")
+    selection=("${(f)out}")
+
+    key="$selection[1]"
+    note="$selection[2]"
+
+    case "$key" in
+        ctrl-m)
+            remind edit "$note"
+            ;;
+        del)
+            remind delete "$note"
+            ;;
+    esac
+}
+
+content() {
+    tld=$(remind info | rg "PATH" | cut -d':' -f2)
+
+    # Search through the remind TLD for the given search term
+    results=$(rg --no-heading "$1" "$tld")
+
+    out=$(fuzzy_remind "$results")
+    selection=("${(f)out}")
+
+    key="$selection[1]"
+    note=$(echo "$selection[2]" | cut -d':' -f1)
+
+    case "$key" in
+        ctrl-m)
+            remind edit "$note"
+            ;;
+        del)
+            remind delete "$note"
+            ;;
+    esac
+}
+
+if [[ "$1" = "--content" ]]; then
+    if [[ "$#" -ne 2 ]]; then
+        echo "Usage: fremind --content <pattern>"
+        exit 1
+    fi
+
+    shift
+    content "$1"
+else
+    names "$1"
 fi
-
-out=$(fuzzy_remind "$notes" "$1")
-selection=("${(f)out}")
-
-key="$selection[1]"
-note="$selection[2]"
-
-case "$key" in
-    ctrl-m)
-        remind edit "$note"
-        ;;
-    del)
-        remind delete "$note"
-        ;;
-esac
